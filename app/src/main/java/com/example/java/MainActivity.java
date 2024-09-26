@@ -2,6 +2,7 @@ package com.example.java;
 
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothSocket;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -9,7 +10,10 @@ import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.util.Log;
 import android.view.View;
+import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.ListView;
@@ -20,18 +24,23 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 
 public class MainActivity extends AppCompatActivity {
 
     private static final int REQUEST_BLUETOOTH_PERMISSION = 1;
+    private static final String TAG = "MainActivity";
+    private static final UUID MY_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
     private BluetoothAdapter mBluetoothAdapter;
     private ListView deviceListView;
     private ArrayAdapter<String> adapter;
-    private final Set<String> deviceSet = new HashSet<>(); // Sử dụng Set để lưu tên thiết bị duy nhất
+    private final Set<BluetoothDevice> deviceSet = new HashSet<>();
+    private BluetoothSocket bluetoothSocket; // Thêm socket để quản lý kết nối
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -44,28 +53,25 @@ public class MainActivity extends AppCompatActivity {
 
         mBluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
 
-        // Kiểm tra quyền Bluetooth
         checkBluetoothPermissions();
 
-        btnOn.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                enableDisableBT();
-            }
-        });
+        btnOn.setOnClickListener(v -> enableDisableBT());
 
-        btnDiscover.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                discoverDevices();
-            }
-        });
+        btnDiscover.setOnClickListener(v -> discoverDevices());
 
-        // Khởi tạo adapter cho ListView
-        adapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, new ArrayList<>(deviceSet));
+        adapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, new ArrayList<>());
         deviceListView.setAdapter(adapter);
 
-        // Đăng ký BroadcastReceiver
+        deviceListView.setOnItemClickListener((parent, view, position, id) -> {
+            String deviceName = adapter.getItem(position);
+            for (BluetoothDevice device : deviceSet) {
+                if (device.getName().equals(deviceName)) {
+                    connectToDevice(device);
+                    break;
+                }
+            }
+        });
+
         IntentFilter filter = new IntentFilter(BluetoothDevice.ACTION_FOUND);
         registerReceiver(mBroadcastReceiver, filter);
     }
@@ -91,20 +97,26 @@ public class MainActivity extends AppCompatActivity {
         public void onReceive(Context context, Intent intent) {
             String action = intent.getAction();
             if (BluetoothDevice.ACTION_FOUND.equals(action)) {
-                // Nhận thông tin về thiết bị được phát hiện
                 BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
-                String deviceName = device.getName();
-
-                // Chỉ thêm thiết bị nếu có tên
-                if (deviceName != null && !deviceName.isEmpty()) {
-                    deviceSet.add(deviceName); // Chỉ thêm tên thiết bị vào Set
-                    adapter.clear(); // Xóa danh sách hiện tại
-                    adapter.addAll(deviceSet); // Cập nhật danh sách
-                    adapter.notifyDataSetChanged(); // Cập nhật ListView
+                if (device != null && device.getName() != null && !device.getName().isEmpty()) {
+                    deviceSet.add(device);
+                    updateDeviceList();
+                } else {
+                    Log.e(TAG, "Thiết bị không hợp lệ.");
                 }
             }
         }
     };
+
+    private void updateDeviceList() {
+        List<String> deviceNames = new ArrayList<>();
+        for (BluetoothDevice device : deviceSet) {
+            deviceNames.add(device.getName());
+        }
+        adapter.clear();
+        adapter.addAll(deviceNames);
+        adapter.notifyDataSetChanged();
+    }
 
     private void enableDisableBT() {
         if (mBluetoothAdapter == null) {
@@ -125,14 +137,48 @@ public class MainActivity extends AppCompatActivity {
             mBluetoothAdapter.cancelDiscovery();
         }
         Toast.makeText(this, "Đang tìm thiết bị...", Toast.LENGTH_SHORT).show();
-        // Bắt đầu tìm kiếm
         mBluetoothAdapter.startDiscovery();
+    }
+
+    private void connectToDevice(BluetoothDevice device) {
+        if (bluetoothSocket != null) {
+            try {
+                bluetoothSocket.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Lỗi khi đóng socket", e);
+            }
+        }
+
+        new Thread(() -> {
+            try {
+                bluetoothSocket = device.createRfcommSocketToServiceRecord(MY_UUID);
+                bluetoothSocket.connect();
+                runOnUiThread(() -> Toast.makeText(MainActivity.this, "Đã kết nối với " + device.getName(), Toast.LENGTH_SHORT).show());
+            } catch (IOException e) {
+                Log.e(TAG, "Lỗi khi kết nối với thiết bị", e);
+                runOnUiThread(() -> Toast.makeText(MainActivity.this, "Không thể kết nối với " + device.getName(), Toast.LENGTH_SHORT).show());
+                try {
+                    if (bluetoothSocket != null) {
+                        bluetoothSocket.close();
+                    }
+                } catch (IOException closeException) {
+                    Log.e(TAG, "Không thể đóng socket", closeException);
+                }
+            }
+        }).start();
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        unregisterReceiver(mBroadcastReceiver); // Hủy đăng ký Receiver khi Activity bị hủy
+        unregisterReceiver(mBroadcastReceiver);
+        if (bluetoothSocket != null) {
+            try {
+                bluetoothSocket.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Không thể đóng socket khi thoát ứng dụng", e);
+            }
+        }
     }
 
     @Override
